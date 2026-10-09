@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#2b2233">
+<link rel="manifest" href="manifest.json"><link rel="icon" href="icon-192.png">
+<title>Améliorer ma vidéo</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#2b2233;color:#f4ece4;padding:20px;max-width:520px;margin:auto}
+h1{font-size:22px;margin:8px 0 4px}p.s,.s{opacity:.7;margin:0 0 18px;font-size:14px}
+button,label.b{display:block;width:100%;box-sizing:border-box;padding:16px;border:0;border-radius:14px;font-size:17px;margin:10px 0;background:#e8c9a0;color:#2b2233;font-weight:600;text-align:center}
+button:disabled{opacity:.4}button.alt{background:#4a3d57;color:#f4ece4}
+.opt{display:flex;align-items:center;gap:12px;padding:12px 4px;font-size:17px}.opt input{width:24px;height:24px;accent-color:#e8c9a0}
+progress{width:100%;height:14px}#st{font-size:14px;margin:8px 0;min-height:40px}
+video{width:100%;border-radius:12px;margin-top:8px}#log{font-size:11px;opacity:.5;white-space:pre-wrap;max-height:90px;overflow:auto}
+</style></head><body>
+<h1>Améliorer ma vidéo</h1>
+<p class="s">Tout se passe sur ton téléphone. Ta vidéo n'est jamais envoyée nulle part.</p>
+<label class="b" for="f">1. Choisir une vidéo</label>
+<input id="f" type="file" accept="video/*" hidden>
+<div id="nom" class="s"></div>
+<label class="opt"><input type="checkbox" id="son" checked> Améliorer le son</label>
+<label class="opt"><input type="checkbox" id="img" checked> Améliorer légèrement l'image</label>
+<button id="go" disabled>2. AMÉLIORER</button>
+<progress id="p" value="0" max="100" hidden></progress>
+<div id="st"></div>
+<div id="fin" hidden>
+<video id="v" controls playsinline></video>
+<button id="save">Enregistrer dans mes vidéos</button>
+<button id="share" class="alt">Partager (Edits, CapCut…)</button>
+</div>
+<div id="log"></div>
+<script src="ffmpeg.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const CORE='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/';
+// ---- réglages (valeurs douces) ----
+const AUDIO=['highpass=f=80','afftdn=nr=12:nf=-35:tn=1','equalizer=f=200:t=q:w=1:g=-2',
+ 'equalizer=f=3000:t=q:w=1:g=2.5','equalizer=f=8000:t=q:w=1:g=1',
+ 'acompressor=threshold=0.1:ratio=3:attack=15:release=250:makeup=2'];
+const LN='loudnorm=I=-16:TP=-1.5:LRA=9';
+const IMAGE=["scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+ 'hqdn3d=1.5:1.5:4:4','eq=brightness=0.02:contrast=1.06:saturation=1.08','unsharp=5:5:0.5:5:5:0.0'];
+// -----------------------------------
+let ff,file,out,logs=[],phase=[0,100];
+const st=t=>$('st').textContent=t;
+const blobURL=async(u,t)=>URL.createObjectURL(new Blob([await(await fetch(u)).arrayBuffer()],{type:t}));
+$('f').onchange=e=>{file=e.target.files[0];$('fin').hidden=true;
+ $('nom').textContent=file?file.name+' ('+Math.round(file.size/1e6)+' Mo)':'';$('go').disabled=!file;
+ if(file&&file.size>6e8)st('⚠ Vidéo très lourde : le téléphone risque de manquer de mémoire.');};
+async function charger(){
+ if(ff)return;st('Préparation (1re fois : téléchargement ~30 Mo, ensuite hors-ligne)…');
+ ff=new FFmpegWASM.FFmpeg();
+ ff.on('log',({message})=>{logs.push(message);$('log').textContent=message;});
+ ff.on('progress',({progress})=>{const x=Math.max(0,Math.min(1,progress||0));
+  $('p').value=phase[0]+(phase[1]-phase[0])*x;});
+ await ff.load({coreURL:await blobURL(CORE+'ffmpeg-core.js','text/javascript'),
+  wasmURL:await blobURL(CORE+'ffmpeg-core.wasm','application/wasm')});
+}
+$('go').onclick=async()=>{
+ const son=$('son').checked,img=$('img').checked;
+ if(!son&&!img){st('Coche au moins une option.');return;}
+ $('go').disabled=true;$('p').hidden=false;$('p').value=0;$('fin').hidden=true;
+ let lock;try{lock=await navigator.wakeLock.request('screen')}catch(e){}
+ try{
+  await charger();
+  const ext=(file.name.match(/\.\w+$/)||['.mp4'])[0],inp='in'+ext;
+  st('Lecture de la vidéo…');
+  await ff.writeFile(inp,new Uint8Array(await file.arrayBuffer()));
+  let af=null;
+  if(son){
+   phase=[0,10];st('Son : mesure du volume…');logs=[];
+   await ff.exec(['-i',inp,'-vn','-af',AUDIO.concat(LN+':print_format=json').join(','),'-f','null','-']);
+   const m=logs.join('\n').match(/\{[^{}]*"input_i"[^{}]*\}/);
+   let ln=LN;
+   if(m){const j=JSON.parse(m[0]);
+    ln+=`:measured_I=${j.input_i}:measured_TP=${j.input_tp}:measured_LRA=${j.input_lra}:measured_thresh=${j.input_thresh}:offset=${j.target_offset}:linear=true`;}
+   af=AUDIO.concat(ln,'alimiter=limit=0.89:level=false').join(',');
+  }
+  phase=[son?10:0,100];
+  st(img?'Création de la vidéo… (l\'image est plus longue, garde l\'écran allumé)':'Création de la vidéo…');
+  const a=['-i',inp];
+  if(img)a.push('-vf',IMAGE.join(','),'-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p');
+  else a.push('-c:v','copy');
+  if(af)a.push('-af',af,'-c:a','aac','-b:a','256k','-ar','48000');else a.push('-c:a','copy');
+  a.push('-movflags','+faststart','-y','out.mp4');
+  const code=await ff.exec(a);
+  if(code!==0)throw new Error('FFmpeg a échoué (code '+code+'). Essaie une vidéo plus courte ou seulement le son.');
+  const data=await ff.readFile('out.mp4');
+  await ff.deleteFile(inp);await ff.deleteFile('out.mp4');
+  out=new File([data.buffer],file.name.replace(/\.\w+$/,'')+'_amelioree.mp4',{type:'video/mp4'});
+  $('v').src=URL.createObjectURL(out);$('fin').hidden=false;$('p').value=100;
+  st('✔ Terminé. Vérifie le résultat puis enregistre.');
+ }catch(e){st('Erreur : '+e.message);ff=null;}
+ finally{$('go').disabled=false;if(lock)lock.release();}
+};
+$('save').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(out);a.download=out.name;
+ document.body.appendChild(a);a.click();a.remove();st('Enregistrée dans le dossier Téléchargements de ton téléphone (visible dans ta galerie / Fichiers).');};
+$('share').onclick=async()=>{try{
+ if(navigator.canShare&&navigator.canShare({files:[out]}))await navigator.share({files:[out]});
+ else st('Le partage n\'est pas disponible ici : utilise « Enregistrer ».');}catch(e){}};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script></body></html>
